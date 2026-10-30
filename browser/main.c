@@ -1,6 +1,5 @@
 #include <stdbool.h>
 #include <stdint.h>
-#include <stdio.h>
 
 #include "xsdk/gpu.h"
 #include "xsdk/kernel.h"
@@ -8,231 +7,179 @@
 #include "xsdk/present.h"
 #include "xsdk/text.h"
 
-#define TAB_COUNT 6
-
 #define BUFFER_COUNT 2
-#define SWAP_INTERVAL 2
+#define SWAP_INTERVAL 1
 #define FRAME_TIMEOUT 5000
 
-#define COLOR_BG      0xFF101010
-#define COLOR_GREEN   0xFF76B900
-#define COLOR_WHITE   0xFFFFFFFF
-#define COLOR_GRAY    0xFFAAAAAA
-#define COLOR_DARK    0xFF202020
+#define BG       0xFF101010
+#define GREEN    0xFF76B900
+#define WHITE    0xFFFFFFFF
+#define GRAY     0xFF999999
+#define MUTED    0xFF555555
 
-static const char *tabs[TAB_COUNT] = {
-    "HOME",
-    "GAMES",
-    "SEARCH",
-    "FAVORITES",
-    "PROFILE",
-    "SETTINGS"
+#define NAV_COUNT 7
+#define GAME_COUNT 4
+
+static const char *navigation[NAV_COUNT] = {
+    "HOME", "GAMES", "SEARCH", "LIBRARY",
+    "FAVORITES", "PROFILE", "SETTINGS"
 };
 
-static const char *descriptions[TAB_COUNT] = {
-    "Welcome to Xbox Cloud Gaming",
-    "Your cloud game library",
-    "Find your favourite games",
-    "Your saved games",
-    "Your gaming profile",
-    "Application settings"
+static const char *games[GAME_COUNT] = {
+    "GRAND THEFT AUTO V",
+    "FORZA HORIZON",
+    "MINECRAFT",
+    "ROBLOX"
 };
 
-static uint32_t selected_tab = 0;
+static uint32_t nav_selected = 0;
+static uint32_t game_selected = 0;
 
-/* Draw Home Screen */
-
-static void draw_screen(
-    uint32_t address,
-    uint32_t width,
-    uint32_t height
-)
+static void draw_ui(uint32_t address,
+                    uint32_t width,
+                    uint32_t height)
 {
-    xsdk_gpu_set_target(width, height);
-
-    const int scale = 1;
-    const int margin = 40;
-
     /* Header */
-
     xsdk_text_draw(
-        margin,
-        30,
-        2,
-        COLOR_GREEN,
-        "XBOX CLOUD"
+        45, 30, 2, GREEN,
+        "GEFORCE NOW"
     );
 
     xsdk_text_draw(
-        margin,
-        75,
-        scale,
-        COLOR_GRAY,
-        "CLOUD GAMING PLATFORM"
+        850, 40, 1, WHITE,
+        "XBOX 360 EDITION"
     );
 
-    /* Navigation Bar */
+    xsdk_text_draw(
+        45, 100, 1, GRAY,
+        "YOUR CLOUD GAMING DESTINATION"
+    );
 
-    int nav_x = margin;
-    int nav_y = 145;
+    /* Navigation */
+    int32_t x = 45;
 
-    const int spacing = 150;
-
-    for (uint32_t i = 0; i < TAB_COUNT; i++)
-    {
-        uint32_t color = COLOR_WHITE;
-
-        if (i == selected_tab)
-            color = COLOR_GREEN;
+    for (uint32_t i = 0; i < NAV_COUNT; i++) {
+        uint32_t color =
+            (i == nav_selected) ? GREEN : WHITE;
 
         xsdk_text_draw(
-            nav_x,
-            nav_y,
-            scale,
-            color,
-            tabs[i]
+            x, 155, 1, color,
+            navigation[i]
         );
 
-        nav_x += spacing;
+        x += 165;
     }
 
-    /* Selected Tab */
-
+    /* Main heading */
     xsdk_text_draw(
-        margin,
-        260,
-        2,
-        COLOR_GREEN,
-        tabs[selected_tab]
+        45, 235, 2, WHITE,
+        "DISCOVER YOUR NEXT GAME"
     );
 
     xsdk_text_draw(
-        margin,
-        320,
-        scale,
-        COLOR_WHITE,
-        descriptions[selected_tab]
+        45, 290, 1, GRAY,
+        "SELECT A GAME WITH YOUR CONTROLLER"
     );
 
-    /* Home Screen Message */
+    /* Game Cards - Text placeholders */
+    for (uint32_t i = 0; i < GAME_COUNT; i++) {
+        int32_t card_x = 45 + (int32_t)i * 295;
+        uint32_t color =
+            (i == game_selected) ? GREEN : GRAY;
 
-    if (selected_tab == 0)
-    {
         xsdk_text_draw(
-            margin,
-            390,
-            scale,
-            COLOR_GRAY,
-            "YOUR GAMES. YOUR WORLD."
+            card_x, 390, 1, color,
+            "------------------------"
         );
 
         xsdk_text_draw(
-            margin,
-            440,
-            scale,
-            COLOR_GREEN,
-            "CLOUD GAMING READY"
+            card_x, 430, 1, color,
+            games[i]
+        );
+
+        xsdk_text_draw(
+            card_x, 465, 1, MUTED,
+            "GAME COVER"
+        );
+
+        xsdk_text_draw(
+            card_x, 500, 1, color,
+            "------------------------"
         );
     }
 
     /* Footer */
-
     xsdk_text_draw(
-        margin,
-        height - 85,
-        scale,
-        COLOR_GRAY,
-        "LEFT / RIGHT: NAVIGATE"
+        45, height - 100, 1, GRAY,
+        "DPAD: NAVIGATE"
     );
 
     xsdk_text_draw(
-        margin,
-        height - 55,
-        scale,
-        COLOR_WHITE,
-        "A: SELECT     B: HOME     BACK: EXIT"
+        45, height - 65, 1, WHITE,
+        "A: SELECT    B: HOME    BACK: EXIT"
     );
 
-    /* Present frame */
-
+    /* Display */
     xsdk_gpu_resolve(
         address,
         width,
         height,
-        COLOR_BG
+        BG
     );
 }
 
-/* Controller */
-
-static bool run_browser(
-    uint32_t width,
-    uint32_t height
-)
+static void run_ui(uint32_t width, uint32_t height)
 {
-    uint16_t previous_buttons = 0;
+    uint16_t previous = 0;
 
-    while (true)
-    {
+    while (true) {
         INPUT_STATE input = {0};
 
-        uint32_t input_result =
-            XamInputGetState(0, 0, &input);
-
-        if (input_result != ERROR_SUCCESS)
-        {
+        if (XamInputGetState(0, 0, &input)
+            != ERROR_SUCCESS) {
             input = (INPUT_STATE){0};
         }
 
         uint16_t buttons = input.gamepad.buttons;
-
         uint16_t pressed =
-            (uint16_t)(buttons & (uint16_t)~previous_buttons);
+            (uint16_t)(buttons & (uint16_t)~previous);
 
-        previous_buttons = buttons;
-
-        /* Exit */
+        previous = buttons;
 
         if (pressed & INPUT_GAMEPAD_BACK)
-        {
-            xsdk_log_write("Browser exit requested");
             break;
+
+        if (pressed & INPUT_GAMEPAD_DPAD_RIGHT) {
+            if (nav_selected < NAV_COUNT - 1)
+                nav_selected++;
         }
 
-        /* Right */
-
-        if (pressed & INPUT_GAMEPAD_DPAD_RIGHT)
-        {
-            selected_tab =
-                (selected_tab + 1u) % TAB_COUNT;
+        if (pressed & INPUT_GAMEPAD_DPAD_LEFT) {
+            if (nav_selected > 0)
+                nav_selected--;
         }
 
-        /* Left */
-
-        if (pressed & INPUT_GAMEPAD_DPAD_LEFT)
-        {
-            selected_tab =
-                (selected_tab + TAB_COUNT - 1u) % TAB_COUNT;
+        if (pressed & INPUT_GAMEPAD_DPAD_DOWN) {
+            if (game_selected < GAME_COUNT - 1)
+                game_selected++;
         }
 
-        /* Select */
+        if (pressed & INPUT_GAMEPAD_DPAD_UP) {
+            if (game_selected > 0)
+                game_selected--;
+        }
 
-        if (pressed & INPUT_GAMEPAD_A)
-        {
+        if (pressed & INPUT_GAMEPAD_B) {
+            nav_selected = 0;
+            game_selected = 0;
+        }
+
+        if (pressed & INPUT_GAMEPAD_A) {
             xsdk_log_write(
-                "Selected: %s",
-                tabs[selected_tab]
+                "Selected game: %s",
+                games[game_selected]
             );
         }
-
-        /* Back to Home */
-
-        if (pressed & INPUT_GAMEPAD_B)
-        {
-            selected_tab = 0;
-        }
-
-        /* Begin Frame */
 
         uint32_t address = 0;
 
@@ -242,43 +189,29 @@ static bool run_browser(
                 FRAME_TIMEOUT
             );
 
-        if (!NT_SUCCESS(status))
-        {
+        if (!NT_SUCCESS(status)) {
             xsdk_log_write(
-                "Frame error: 0x%08X",
+                "Present failed: 0x%08X",
                 (unsigned)status
             );
-
-            return false;
+            break;
         }
 
-        draw_screen(
-            address,
-            width,
-            height
-        );
+        draw_ui(address, width, height);
 
         xsdk_present_end();
     }
-
-    return true;
 }
-
-/* Application Entry */
 
 int main(void)
 {
-    xsdk_log_write("Xbox Cloud Gaming UI starting");
+    xsdk_log_write("GeForce UI starting");
 
     NTSTATUS status = xsdk_gpu_open();
 
-    if (!NT_SUCCESS(status))
-    {
-        xsdk_log_write(
-            "GPU initialization failed: 0x%08X",
-            (unsigned)status
-        );
-
+    if (!NT_SUCCESS(status)) {
+        xsdk_log_write("GPU open failed: 0x%08X",
+                       (unsigned)status);
         return 1;
     }
 
@@ -293,53 +226,36 @@ int main(void)
         &height
     );
 
-    if (!NT_SUCCESS(status))
-    {
-        xsdk_log_write(
-            "Display initialization failed: 0x%08X",
-            (unsigned)status
-        );
-
+    if (!NT_SUCCESS(status)) {
+        xsdk_log_write("Display open failed: 0x%08X",
+                       (unsigned)status);
         xsdk_gpu_close();
-
         return 1;
     }
 
     status = xsdk_text_open();
 
-    if (!NT_SUCCESS(status))
-    {
-        xsdk_log_write(
-            "Text initialization failed: 0x%08X",
-            (unsigned)status
-        );
-
+    if (!NT_SUCCESS(status)) {
+        xsdk_log_write("Text open failed: 0x%08X",
+                       (unsigned)status);
         xsdk_present_close();
         xsdk_gpu_close();
-
         return 1;
     }
 
     xsdk_log_write(
-        "Display initialized: %ux%u",
+        "Display ready: %ux%u",
         (unsigned)width,
         (unsigned)height
     );
 
-    bool success = run_browser(width, height);
-
-    /* Shutdown */
+    run_ui(width, height);
 
     xsdk_text_close();
-
     xsdk_present_close();
-
     xsdk_gpu_close();
 
-    xsdk_log_write(
-        "Xbox Cloud Gaming UI stopped: %s",
-        success ? "OK" : "ERROR"
-    );
+    xsdk_log_write("GeForce UI closed");
 
-    return success ? 0 : 1;
+    return 0;
 }
