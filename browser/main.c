@@ -15,7 +15,7 @@
 
 static char current_url[256] = "https://www.google.com";
 static char status_text[128] = "Ready";
-static int selected = 0;
+
 
 static const uint32_t BACKGROUND = 0xFF101820;
 static const uint32_t GREEN = 0xFF107C10;
