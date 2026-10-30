@@ -7,6 +7,8 @@
 #include "xsdk/present.h"
 #include "xsdk/text.h"
 
+#define TAB_COUNT 6
+
 enum {
     BUFFERS = 2,
     SWAP_INTERVAL = 2,
@@ -15,9 +17,8 @@ enum {
     BACKGROUND = 0xFF101010,
     GREEN = 0xFF76B900,
     WHITE = 0xFFFFFFFF,
-    GRAY = 0xFFAAAAAA,
-
-    TAB_COUNT = 6
+    GRAY = 0xFFAAAAAA
+};
 };
 
 static const char *tabs[TAB_COUNT] = {
