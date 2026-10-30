@@ -1,0 +1,36 @@
+name: browser
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bison flex texinfo libgmp-dev libmpfr-dev libmpc-dev curl xz-utils patch python3 cmake ninja-build git
+      - name: Clone xsdk
+        run: git clone --depth 1 https://github.com/xenosworks/xsdk.git /home/runner/xsdk
+      - uses: actions/cache@v4
+        id: tc
+        with:
+          path: /home/runner/xsdk-gcc
+          key: xsdk-gcc-v1
+      - name: Build toolchain
+        if: steps.tc.outputs.cache-hit != 'true'
+        run: |
+          cd /home/runner/xsdk
+          PREFIX=/home/runner/xsdk-gcc WORK=/home/runner/xsdk-gcc-work JOBS=$(nproc) bash tools/toolchain/build.sh
+      - name: Build xsdk
+        run: |
+          cd /home/runner/xsdk
+          make -j$(nproc)
+      - name: Build browser
+        run: |
+          cp "$GITHUB_WORKSPACE/browser/main.c" /home/runner/xsdk/samples/triangle/main.c
+          cd /home/runner/xsdk
+          make samples
+      - uses: actions/upload-artifact@v4
+        with:
+          name: browser-xex
+          path: /home/runner/xsdk/build/samples/triangle/*.xex
