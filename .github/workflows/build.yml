@@ -27,7 +27,7 @@ jobs:
           repository: xenosworks/xsdk
           path: xsdk
 
-       - name: Build Xbox 360 toolchain
+     - name: Build Xbox 360 toolchain
         working-directory: xsdk
         run: |
           PREFIX=$HOME/xsdk-gcc \
