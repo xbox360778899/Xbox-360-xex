@@ -19,7 +19,7 @@ jobs:
         if: steps.tc.outputs.cache-hit != 'true'
         run: |
           cd /home/runner/xsdk
-          PREFIX=/home/runner/xsdk-gcc WORK=/home/runner/xsdk-gcc-work JOBS=$(nproc) tools/toolchain/build.sh
+          PREFIX=/home/runner/xsdk-gcc WORK=/home/runner/xsdk-gcc-work JOBS=$(nproc) bash tools/toolchain/build.sh
       - name: Build xsdk
         run: |
           cd /home/runner/xsdk
