@@ -1,80 +1,255 @@
-#include <stdbool.h>
 #include <stdint.h>
-#include <stdio.h>
-#include <string.h>
 
-#include <xsdk/gpu.h>
-#include <xsdk/kernel.h>
-#include <xsdk/log.h>
-#include <xsdk/present.h>
-#include <xsdk/text.h>
+/*
+ * G4 Hybrid Browser / Cloud Gaming Dashboard
+ * Target: Xbox 360 RGH/JTAG - Cedosworks XSDK
+ *
+ * IMPORTANT:
+ * The framework must provide xsdk_text_draw() and register/call
+ * draw_ui() through its own frame presenter.
+ *
+ * No traditional main() entry point is defined here.
+ */
 
-// Color Specifications
-#define COLOR_GREEN  0xFF76B900
+/* Framework graphics API */
+extern void xsdk_text_draw(
+    float x,
+    float y,
+    float scale,
+    uint32_t color_hex,
+    const char *string
+);
+
+/* Screen colors */
+#define COLOR_GREEN  0x00FF55FF
 #define COLOR_WHITE  0xFFFFFFFF
-#define COLOR_GRAY   0xFF999999
-#define COLOR_MUTED  0xFF555555
+#define COLOR_BLACK  0x101820FF
+#define COLOR_GRAY   0xAAB3BFFF
+#define COLOR_BLUE   0x40A0FFFF
+#define COLOR_YELLOW 0xFFFF55FF
 
-#define NAV_COUNT 4
+/* Persistent application state */
+static const char *g_current_url = "https://github.io";
+static const char *g_active_title = "G4 Hybrid Browser";
+static const char *g_html_state = "HTML ENGINE: READY";
 
-// Browser Global Variables
-static const char *current_url = "https://github.io";
-static const char *page_title = "XBOX 360 CLOUD DASHBOARD";
-static const char *html_render_buffer = "MIX ENGINE: READY (CLOUD CACHE SECURE)";
+static const char *g_browser_status = "BROWSER: INITIALIZED";
+static const char *g_network_status = "NETWORK: WAITING";
+static const char *g_stream_status = "CLOUD STREAM: STANDBY";
+static const char *g_engine_status = "MEDIA ENGINE: NOT CONNECTED";
 
-static uint32_t active_tab = 0;
-static const char *browser_tabs[NAV_COUNT] = { " BROWSER", " SEARCH", " CLOUD", " EXIT" };
+/* Dashboard navigation tabs */
+static const char * const g_tabs[] = {
+    "BROWSER",
+    "SEARCH",
+    "CLOUD",
+    "EXIT"
+};
 
-// 1. Core UI Graphic Layer Execution Function
-void draw_ui(uint32_t address, uint32_t width, uint32_t height) {
+#define G4_TAB_COUNT 4
+
+/* Application selection state */
+static unsigned int g_active_tab = 0;
+
+/*
+ * Main drawing callback.
+ * The XSDK frame presenter should call this function.
+ */
+void draw_ui(uint32_t address, uint32_t width, uint32_t height)
+{
+    unsigned int i;
+    float screen_width;
+    float center_x;
+
+    /* Explicit parameter handling for strict compiler flags */
     (void)address;
     (void)width;
     (void)height;
 
-    // Header Layout Rendering
-    xsdk_text_draw(45, 30, 2, COLOR_GREEN, "XENON WEB CORE"); 
-    xsdk_text_draw(500, 35, 1, COLOR_WHITE, "v1.0 (Stable-xsdk)"); 
+    screen_width = (float)width;
+    center_x = screen_width * 0.5f;
 
-    // Address Bar Render System
-    xsdk_text_draw(45, 90, 1, COLOR_GRAY, "ADDRESS >");
-    xsdk_text_draw(150, 90, 1, COLOR_WHITE, current_url);
+    /* =========================================
+       TOP GREEN HEADER
+       ========================================= */
 
-    // Dynamic Navigation Generation Row
-    int32_t tab_x = 45;
-    for (uint32_t i = 0; i < NAV_COUNT; i++) {
-        uint32_t tab_color = (i == active_tab) ? COLOR_GREEN : COLOR_WHITE;
-        xsdk_text_draw(tab_x, 140, 1, tab_color, browser_tabs[i]);
-        tab_x += 160; 
+    xsdk_text_draw(
+        35.0f, 25.0f, 2.0f,
+        COLOR_GREEN,
+        "G4"
+    );
+
+    xsdk_text_draw(
+        105.0f, 31.0f, 1.2f,
+        COLOR_WHITE,
+        "HYBRID BROWSER"
+    );
+
+    xsdk_text_draw(
+        screen_width - 190.0f, 35.0f, 0.8f,
+        COLOR_GRAY,
+        "XBOX 360"
+    );
+
+    xsdk_text_draw(
+        35.0f, 65.0f, 0.8f,
+        COLOR_GREEN,
+        "============================================================"
+    );
+
+    /* =========================================
+       ACTIVE ADDRESS BAR
+       ========================================= */
+
+    xsdk_text_draw(
+        35.0f, 100.0f, 1.0f,
+        COLOR_GRAY,
+        "ADDRESS"
+    );
+
+    xsdk_text_draw(
+        130.0f, 100.0f, 1.0f,
+        COLOR_WHITE,
+        g_current_url
+    );
+
+    xsdk_text_draw(
+        35.0f, 130.0f, 0.8f,
+        COLOR_BLUE,
+        "------------------------------------------------------------"
+    );
+
+    /* =========================================
+       APPLICATION NAVIGATION
+       ========================================= */
+
+    xsdk_text_draw(
+        35.0f, 165.0f, 1.2f,
+        COLOR_WHITE,
+        "G4 NAVIGATION"
+    );
+
+    for (i = 0; i < G4_TAB_COUNT; i++)
+    {
+        if (i == g_active_tab)
+        {
+            xsdk_text_draw(
+                45.0f + ((float)i * 175.0f),
+                210.0f,
+                1.0f,
+                COLOR_GREEN,
+                "[ ACTIVE ]"
+            );
+        }
+
+        xsdk_text_draw(
+            45.0f + ((float)i * 175.0f),
+            235.0f,
+            1.0f,
+            (i == g_active_tab) ? COLOR_GREEN : COLOR_WHITE,
+            g_tabs[i]
+        );
     }
 
-    // Canvas HTML/Display Matrix Block
-    xsdk_text_draw(45, 220, 2, COLOR_WHITE, page_title);
-    xsdk_text_draw(45, 280, 1, COLOR_WHITE, html_render_buffer);
+    /* =========================================
+       MAIN CONTENT FRAME
+       ========================================= */
 
-    // Secure Pipeline Label Layout
-    xsdk_text_draw(45, 540, 1, COLOR_MUTED, "SYSTEM LAYER: ACTIVE | SECURE PIPELINE VIA GITHUB");
-}
+    xsdk_text_draw(
+        35.0f, 290.0f, 1.2f,
+        COLOR_GREEN,
+        "DASHBOARD"
+    );
 
-// 2. Main System Entry Point Fix (Linker satisfaction block)
-int main(int argc, char **argv) {
-    (void)argc;
-    (void)argv;
+    xsdk_text_draw(
+        35.0f, 330.0f, 1.0f,
+        COLOR_WHITE,
+        g_active_title
+    );
 
-    xsdk_log_write("[SYSTEM] Initializing Xbox 360 SDK runtime environment...");
+    xsdk_text_draw(
+        35.0f, 370.0f, 0.9f,
+        COLOR_GRAY,
+        "Welcome to G4 Cloud Gaming."
+    );
 
-    // Cedosworks framework registration context setup loops
-    // Yeh core functions internal hardware present loop aur layers initiate karte hain
-    xsdk_gpu_init();
-    xsdk_text_init();
+    xsdk_text_draw(
+        35.0f, 405.0f, 0.9f,
+        COLOR_GRAY,
+        "Browser and streaming modules are separate components."
+    );
 
-    xsdk_log_write("[BROWSER] Application graphics engine loop starting...");
+    /* =========================================
+       SYSTEM STATUS FRAME
+       ========================================= */
 
-    // Infinite presenter application rendering callback hook registration loop
-    while (1) {
-        // Framework specific synchronization calls can go here
-        // Yeh graphics layers refresh aur swap chain pipelines call karta hai
-        xsdk_present_loop(draw_ui);
-    }
+    xsdk_text_draw(
+        35.0f, 465.0f, 1.1f,
+        COLOR_GREEN,
+        "SYSTEM STATUS"
+    );
 
-    return 0;
+    xsdk_text_draw(
+        35.0f, 500.0f, 0.85f,
+        COLOR_WHITE,
+        g_browser_status
+    );
+
+    xsdk_text_draw(
+        35.0f, 530.0f, 0.85f,
+        COLOR_YELLOW,
+        g_network_status
+    );
+
+    xsdk_text_draw(
+        35.0f, 560.0f, 0.85f,
+        COLOR_GRAY,
+        g_stream_status
+    );
+
+    xsdk_text_draw(
+        35.0f, 590.0f, 0.85f,
+        COLOR_GRAY,
+        g_engine_status
+    );
+
+    /* =========================================
+       HTML STATE
+       ========================================= */
+
+    xsdk_text_draw(
+        center_x + 100.0f,
+        500.0f,
+        0.8f,
+        COLOR_GREEN,
+        g_html_state
+    );
+
+    /* =========================================
+       CONTROLLER HELP
+       ========================================= */
+
+    xsdk_text_draw(
+        35.0f, 650.0f, 0.8f,
+        COLOR_GREEN,
+        "A SELECT"
+    );
+
+    xsdk_text_draw(
+        190.0f, 650.0f, 0.8f,
+        COLOR_WHITE,
+        "B BACK"
+    );
+
+    xsdk_text_draw(
+        340.0f, 650.0f, 0.8f,
+        COLOR_BLUE,
+        "X SEARCH"
+    );
+
+    xsdk_text_draw(
+        500.0f, 650.0f, 0.8f,
+        COLOR_YELLOW,
+        "Y MENU"
+    );
 }
