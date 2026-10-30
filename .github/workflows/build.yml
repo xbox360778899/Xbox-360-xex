@@ -1,36 +1,36 @@
-name: Xbox 360 XEX Build
-
-on:
-  push:
-  workflow_dispatch:
-
+name: build
+on: [push, workflow_dispatch]
 jobs:
   build:
     runs-on: ubuntu-24.04
-
     steps:
-      - name: Checkout project
-        uses: actions/checkout@v4
-
-      - name: Install dependencies
+      - name: Packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            build-essential bison flex texinfo \
-            libgmp-dev libmpfr-dev libmpc-dev \
-            curl xz-utils patch python3 \
-            cmake ninja-build git
-
-      - name: Checkout XSDK
-        uses: actions/checkout@v4
+          sudo apt-get install -y build-essential bison flex texinfo libgmp-dev libmpfr-dev libmpc-dev curl xz-utils patch python3 cmake ninja-build git
+      - name: Clone xsdk
+        run: git clone --depth 1 https://github.com/xenosworks/xsdk.git /home/runner/xsdk
+      - uses: actions/cache@v4
+        id: tc
         with:
-          repository: xenosworks/xsdk
-          path: xsdk
-
-     - name: Build Xbox 360 toolchain
-        working-directory: xsdk
+          path: /home/runner/xsdk-gcc
+          key: xsdk-gcc-v1
+      - name: Build toolchain
+        if: steps.tc.outputs.cache-hit != 'true'
         run: |
-          PREFIX=$HOME/xsdk-gcc \
-          WORK=$HOME/xsdk-gcc-work \
-          JOBS=2 \
-          bash tools/toolchain/build.sh
+          cd /home/runner/xsdk
+          PREFIX=/home/runner/xsdk-gcc WORK=/home/runner/xsdk-gcc-work JOBS=$(nproc) tools/toolchain/build.sh
+      - name: Build xsdk
+        run: |
+          cd /home/runner/xsdk
+          make -j$(nproc)
+      - name: Build template
+        run: |
+          cp -r /home/runner/xsdk/samples/template /home/runner/mytitle
+          cd /home/runner/mytitle
+          cmake -S . -B build -G Ninja -DCMAKE_TOOLCHAIN_FILE=/home/runner/xsdk/cmake/xsdk.cmake -DXSDK_TOOLCHAIN=/home/runner/xsdk-gcc -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xbox-app
+          path: /home/runner/mytitle/build/*.xex
