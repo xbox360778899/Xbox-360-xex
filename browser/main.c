@@ -1,204 +1,180 @@
-name: X360 Web Total 0.4.0 - Build and Publish
+#include <stdbool.h>
+#include <stdint.h>
+#include <string.h>
 
-on:
-  workflow_dispatch:
-  push:
-    tags:
-      - 'v*'
+#include "triangle_shaders.h"
+#include "xsdk/gpu.h"
+#include "xsdk/kernel.h"
+#include "xsdk/log.h"
+#include "xsdk/present.h"
+#include "xsdk/shader.h"
+#include "xsdk/splash.h"
 
-permissions:
-  contents: write
+enum {
+	SPLASH_MS = 2000,
+	BUFFERS = 2,
+	SWAP_INTERVAL = 1,
+	BEGIN_TIMEOUT_MS = 5000,
+	CLEAR_ARGB = 0xFF183060,
+	VERTEX_FLOATS = 5,
+	STRIDE_BYTES = 20,
+	COLOR_OFFSET_BYTES = 8,
+	MAX_VERTICES = 3072,
+	MAX_BYTES = MAX_VERTICES * STRIDE_BYTES,
+	CELL_PX = 12,
+};
 
-concurrency:
-  group: x360-web-total-release-${{ github.ref }}
-  cancel-in-progress: false
+static const XsdkVertexElement layout[] = {
+	{ .usage = XSDK_USAGE_POSITION, .format = XSDK_VERTEX_FLOAT2, .offset_bytes = 0 },
+	{ .usage = XSDK_USAGE_COLOR, .format = XSDK_VERTEX_FLOAT3, .offset_bytes = COLOR_OFFSET_BYTES },
+};
 
-env:
-  SOURCE_ARCHIVE: X360-Web-Total-0.4.0-source.zip
-  LIBXENON_IMAGE: free60/libxenon@sha256:3534d7952210ee5553790a1c1f12001145655e28f9e12a01ce151efe4b4f743d
-  XELL_LAUNCH2_URL: https://github.com/mitchellwaite/XellLaunch2/releases/download/v2.2.0/XellLaunch2.xex
-  XELL_LAUNCH2_SHA256: 49dd8666b83a7c7b37597affc46513fe2cb9ab5cb2fe1fb71da1b13175276bb0
+static float buf[MAX_VERTICES * VERTEX_FLOATS];
+static uint32_t vcount;
 
-jobs:
-  build:
-    name: Verify source, test, compile and package Xbox 360
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
+static const uint8_t *glyph(char c)
+{
+	static const uint8_t blank[7] = { 0, 0, 0, 0, 0, 0, 0 };
+	static const uint8_t gx[7] = { 0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11 };
+	static const uint8_t gb[7] = { 0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E };
+	static const uint8_t go[7] = { 0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E };
+	static const uint8_t gr[7] = { 0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11 };
+	static const uint8_t gw[7] = { 0x11, 0x11, 0x11, 0x15, 0x15, 0x1B, 0x11 };
+	static const uint8_t gs[7] = { 0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E };
+	static const uint8_t ge[7] = { 0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F };
+	switch (c) {
+	case 'X': return gx;
+	case 'B': return gb;
+	case 'O': return go;
+	case 'R': return gr;
+	case 'W': return gw;
+	case 'S': return gs;
+	case 'E': return ge;
+	default: return blank;
+	}
+}
 
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: false
+static void add_vertex(float x, float y)
+{
+	float *v = &buf[vcount * VERTEX_FLOATS];
+	v[0] = x;
+	v[1] = y;
+	v[2] = 1.0f;
+	v[3] = 1.0f;
+	v[4] = 1.0f;
+	vcount++;
+}
 
-      - name: Extract the uploaded 0.4.0 source archive
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          archive="$GITHUB_WORKSPACE/$SOURCE_ARCHIVE"
-          test -s "$archive" || {
-            echo "SOURCE ERROR: $SOURCE_ARCHIVE is missing from the repository root."
-            exit 1
-          }
-          temp="$RUNNER_TEMP/x360-web-total-source"
-          rm -rf "$temp"
-          mkdir -p "$temp"
-          python3 - "$archive" "$temp" <<'PY'
-          import sys
-          import zipfile
-          from pathlib import PurePosixPath
+static void add_quad(float x0, float y0, float x1, float y1)
+{
+	if (vcount + 6 > MAX_VERTICES)
+		return;
+	add_vertex(x0, y0);
+	add_vertex(x1, y0);
+	add_vertex(x0, y1);
+	add_vertex(x1, y0);
+	add_vertex(x1, y1);
+	add_vertex(x0, y1);
+}
 
-          archive_path, destination = sys.argv[1:]
-          with zipfile.ZipFile(archive_path) as z:
-              entries = z.infolist()
-              if not entries or len(entries) > 2000:
-                  raise SystemExit('SOURCE ERROR: ZIP is empty or contains too many entries.')
-              total = 0
-              for entry in entries:
-                  name = entry.filename
-                  path = PurePosixPath(name)
-                  if path.is_absolute() or not path.parts or '..' in path.parts or '\\' in name:
-                      raise SystemExit(f'SOURCE ERROR: unsafe ZIP path: {name}')
-                  total += entry.file_size
-                  if entry.file_size > 16 * 1024 * 1024 or total > 64 * 1024 * 1024:
-                      raise SystemExit('SOURCE ERROR: source archive exceeds size limits.')
-              bad = z.testzip()
-              if bad:
-                  raise SystemExit(f'SOURCE ERROR: ZIP CRC error: {bad}')
-              z.extractall(destination)
-          PY
-          project="$temp/X360-Web-Total-0.4.0"
-          test -d "$project" || {
-            echo 'SOURCE ERROR: expected top-level folder X360-Web-Total-0.4.0/ inside archive.'
-            find "$temp" -maxdepth 2 -type f -print
-            exit 1
-          }
-          test "$(tr -d '\r\n' < "$project/VERSION")" = '0.4.0'
-          echo "XW_PROJECT_DIR=$project" >> "$GITHUB_ENV"
-          echo "Extracted source: $project"
-          find "$project" -maxdepth 2 -type f | sort | head -80
+static void build_text(const char *text, uint32_t width, uint32_t height)
+{
+	const uint32_t chars = (uint32_t)strlen(text);
+	const float startx = ((float)width - (float)(chars * 6 * CELL_PX)) / 2.0f;
+	const float starty = ((float)height - (float)(7 * CELL_PX)) / 2.0f;
+	for (uint32_t i = 0; i < chars; i++) {
+		const uint8_t *g = glyph(text[i]);
+		for (uint32_t r = 0; r < 7; r++) {
+			for (uint32_t c = 0; c < 5; c++) {
+				if (!((g[r] >> (4 - c)) & 1))
+					continue;
+				const float x = startx + (float)((i * 6 + c) * CELL_PX);
+				const float y = starty + (float)(r * CELL_PX);
+				add_quad(x / (float)width * 2.0f - 1.0f, 1.0f - y / (float)height * 2.0f,
+					(x + CELL_PX) / (float)width * 2.0f - 1.0f, 1.0f - (y + CELL_PX) / (float)height * 2.0f);
+			}
+		}
+	}
+}
 
-      - name: Verify project structure
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          test -f "$XW_PROJECT_DIR/VERSION"
-          test -f "$XW_PROJECT_DIR/browser/Makefile"
-          test -f "$XW_PROJECT_DIR/browser/CMakeLists.txt"
-          test -f "$XW_PROJECT_DIR/scripts/package_usb.py"
-          test -f "$XW_PROJECT_DIR/scripts/test_package_usb.py"
-          test -f "$XW_PROJECT_DIR/README-INSTALL-PT-BR.txt"
-          test -f "$XW_PROJECT_DIR/docs/BOOT-FLOW.md"
-          test -f "$XW_PROJECT_DIR/usb/X360WebTotal/config/browser.ini"
-          test -f "$XW_PROJECT_DIR/usb/X360WebTotal/ui/home.html"
-          echo "Project structure verified. Version: $(cat "$XW_PROJECT_DIR/VERSION")"
+static void upload(volatile uint32_t *dst)
+{
+	for (uint32_t i = 0; i < vcount * VERTEX_FLOATS; i++) {
+		uint32_t w;
+		memcpy(&w, &buf[i], 4);
+		dst[i] = w;
+	}
+	xsdk_gpu_invalidate(xsdk_gpu_address(dst), vcount * STRIDE_BYTES);
+}
 
-      - name: Run package validator tests
-        run: python3 "$XW_PROJECT_DIR/scripts/test_package_usb.py"
+static void run(const XsdkShader *vertex, const XsdkShader *pixel, uint32_t vertices, uint32_t width, uint32_t height)
+{
+	for (;;) {
+		INPUT_STATE input = { 0 };
+		if (XamInputGetState(0, 0, &input) == ERROR_SUCCESS && input.gamepad.buttons & INPUT_GAMEPAD_BACK)
+			return;
+		uint32_t address;
+		const NTSTATUS status = xsdk_present_begin(&address, BEGIN_TIMEOUT_MS);
+		if (!NT_SUCCESS(status)) {
+			xsdk_log_write("browser: xsdk_present_begin failed: 0x%08X", (unsigned)status);
+			return;
+		}
+		xsdk_gpu_set_target(width, height);
+		xsdk_gpu_set_shaders(vertex, pixel);
+		xsdk_built_shader_set_literals(&triangle_vert);
+		xsdk_built_shader_set_literals(&triangle_frag);
+		xsdk_gpu_set_vertices(0, vertices, vcount * STRIDE_BYTES);
+		xsdk_gpu_draw(XSDK_PRIMITIVE_TRIANGLE_LIST, vcount);
+		xsdk_gpu_resolve(address, width, height, CLEAR_ARGB);
+		xsdk_present_end();
+	}
+}
 
-      - name: Install host build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential cmake gcc
-
-      - name: Build and test portable C modules
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          cmake -S "$XW_PROJECT_DIR/browser" -B "$RUNNER_TEMP/xw-host-build" \
-            -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=gcc
-          cmake --build "$RUNNER_TEMP/xw-host-build" --parallel 2
-          ctest --test-dir "$RUNNER_TEMP/xw-host-build" --output-on-failure --no-tests=error
-
-      - name: Pull pinned LibXenon toolchain
-        run: docker pull "$LIBXENON_IMAGE"
-
-      - name: Compile Xbox 360 PowerPC ELF
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          docker run --rm \
-            --volume "$XW_PROJECT_DIR/browser:/workspace/browser" \
-            --workdir /workspace/browser \
-            --entrypoint /bin/bash \
-            "$LIBXENON_IMAGE" \
-            -lc 'set -Eeuo pipefail; export DEVKITXENON=/usr/local/xenon; export PATH="$DEVKITXENON/bin:$DEVKITXENON/usr/bin:$PATH"; make clean all DEVKITXENON="$DEVKITXENON"'
-          test -s "$XW_PROJECT_DIR/browser/xenon.elf"
-          python3 - "$XW_PROJECT_DIR" <<'PY'
-          import sys
-          from pathlib import Path
-          project = Path(sys.argv[1])
-          sys.path.insert(0, str(project / 'scripts'))
-          import package_usb
-          elf = project / 'browser' / 'xenon.elf'
-          package_usb.validate_elf(elf)
-          print(f'Validated Xbox 360 PowerPC ELF: {elf.stat().st_size} bytes')
-          PY
-
-      - name: Download and verify XellLaunch2
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          curl --fail --show-error --location --retry 4 --retry-all-errors \
-            --connect-timeout 20 --max-time 180 "$XELL_LAUNCH2_URL" \
-            --output "$RUNNER_TEMP/XellLaunch2.xex"
-          echo "$XELL_LAUNCH2_SHA256  $RUNNER_TEMP/XellLaunch2.xex" | sha256sum --check
-
-      - name: Create and verify FAT32 USB package
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          python3 "$XW_PROJECT_DIR/scripts/package_usb.py" \
-            --elf "$XW_PROJECT_DIR/browser/xenon.elf" \
-            --xell "$RUNNER_TEMP/XellLaunch2.xex" \
-            --project "$XW_PROJECT_DIR" \
-            --output "$RUNNER_TEMP/X360-Web-Total-USB.zip"
-          test -s "$RUNNER_TEMP/X360-Web-Total-USB.zip"
-
-      - name: Generate release checksums
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          cd "$RUNNER_TEMP"
-          sha256sum X360-Web-Total-USB.zip XellLaunch2.xex > SHA256SUMS-RELEASE.txt
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: X360-Web-Total-0.4.0-USB
-          path: |
-            ${{ runner.temp }}/X360-Web-Total-USB.zip
-            ${{ runner.temp }}/XellLaunch2.xex
-            ${{ runner.temp }}/SHA256SUMS-RELEASE.txt
-            ${{ runner.temp }}/x360-web-total-source/X360-Web-Total-0.4.0/browser/xenon.elf
-          if-no-files-found: error
-          retention-days: 90
-
-      - name: Publish public GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          name: X360 Web Total ${{ github.ref_name }}
-          tag_name: ${{ github.ref_name }}
-          generate_release_notes: true
-          draft: false
-          prerelease: ${{ contains(github.ref_name, '-') }}
-          fail_on_unmatched_files: true
-          files: |
-            ${{ runner.temp }}/X360-Web-Total-USB.zip
-            ${{ runner.temp }}/XellLaunch2.xex
-            ${{ runner.temp }}/SHA256SUMS-RELEASE.txt
-            ${{ runner.temp }}/x360-web-total-source/X360-Web-Total-0.4.0/browser/xenon.elf
-
-      - name: Build summary
-        if: always()
-        shell: bash
-        run: |
-          {
-            echo '## X360 Web Total 0.4.0'
-            echo
-            echo "Build status: ${{ job.status }}"
-            echo "Trigger: ${{ github.event_name }}"
-            echo 'The release is published only for a pushed v* tag.'
-            echo 'A successful cross-build still requires physical Xbox 360 testing.'
-          } >> "$GITHUB_STEP_SUMMARY"
+int main(void)
+{
+	xsdk_log_write("browser: press Back to end");
+	const NTSTATUS splash = xsdk_splash_show(SPLASH_MS);
+	if (!NT_SUCCESS(splash))
+		xsdk_log_write("browser: xsdk_splash_show failed: 0x%08X", (unsigned)splash);
+	NTSTATUS status = xsdk_gpu_open();
+	if (!NT_SUCCESS(status)) {
+		xsdk_log_write("browser: xsdk_gpu_open failed: 0x%08X", (unsigned)status);
+		return 1;
+	}
+	XsdkShader vertex = { .microcode = NULL };
+	XsdkShader pixel = { .microcode = NULL };
+	status = xsdk_shader_load(&vertex, triangle_vert.container, triangle_vert.container_bytes);
+	if (NT_SUCCESS(status))
+		status = xsdk_shader_load(&pixel, triangle_frag.container, triangle_frag.container_bytes);
+	if (NT_SUCCESS(status))
+		status = xsdk_shader_set_vertex_layout(
+			&vertex, layout, sizeof layout / sizeof layout[0], (const uint32_t[]){ STRIDE_BYTES });
+	if (!NT_SUCCESS(status)) {
+		xsdk_log_write("browser: loading the shaders failed: 0x%08X", (unsigned)status);
+		return 1;
+	}
+	volatile uint32_t *const vertices = xsdk_gpu_alloc(MAX_BYTES);
+	if (!vertices) {
+		xsdk_log_write("browser: xsdk_gpu_alloc failed");
+		return 1;
+	}
+	uint32_t width = 0;
+	uint32_t height = 0;
+	status = xsdk_present_open(XSDK_DISPLAY_720P, BUFFERS, SWAP_INTERVAL, &width, &height);
+	if (!NT_SUCCESS(status)) {
+		xsdk_log_write("browser: xsdk_present_open failed: 0x%08X", (unsigned)status);
+		return 1;
+	}
+	build_text("XBOX BROWSER", width, height);
+	upload(vertices);
+	run(&vertex, &pixel, xsdk_gpu_address(vertices), width, height);
+	xsdk_present_close();
+	xsdk_gpu_free(vertices);
+	xsdk_shader_free(&pixel);
+	xsdk_shader_free(&vertex);
+	status = xsdk_gpu_close();
+	if (!NT_SUCCESS(status))
+		xsdk_log_write("browser: xsdk_gpu_close failed: 0x%08X", (unsigned)status);
+	xsdk_log_write("browser: done");
+	return 0;
+}
