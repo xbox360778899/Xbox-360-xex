@@ -1,4 +1,5 @@
-#include <stdbool.h>
+
+#pragma GCC diagnostic ignored "-Wsign-compare"#include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -710,4 +711,37 @@ int main(void)
 		xsdk_log_write("browser: loading the shaders failed: 0x%08X", (unsigned)status);
 		return 1;
 	}
-	uint32_t cap = MAX_VERTIC
+	uint32_t cap = MAX_VERTICES;
+	volatile uint32_t *vertices = NULL;
+	while (cap >= MIN_VERTICES) {
+		vertices = xsdk_gpu_alloc(cap * STRIDE_BYTES);
+		if (vertices)
+			break;
+		cap /= 2;
+	}
+	if (!vertices) {
+		xsdk_log_write("browser: xsdk_gpu_alloc failed");
+		return 1;
+	}
+	vcap = cap;
+	uint32_t width = 0;
+	uint32_t height = 0;
+	status = xsdk_present_open(XSDK_DISPLAY_720P, BUFFERS, SWAP_INTERVAL, &width, &height);
+	if (!NT_SUCCESS(status)) {
+		xsdk_log_write("browser: xsdk_present_open failed: 0x%08X", (unsigned)status);
+		return 1;
+	}
+	screen_w = width;
+	screen_h = height;
+	load_page(0);
+	run(&vertex, &pixel, vertices, width, height);
+	xsdk_present_close();
+	xsdk_gpu_free(vertices);
+	xsdk_shader_free(&pixel);
+	xsdk_shader_free(&vertex);
+	status = xsdk_gpu_close();
+	if (!NT_SUCCESS(status))
+		xsdk_log_write("browser: xsdk_gpu_close failed: 0x%08X", (unsigned)status);
+	xsdk_log_write("browser: done");
+	return 0;
+}
