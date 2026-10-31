@@ -1,53 +1,130 @@
-name: browser
-on: [push, workflow_dispatch]
+name: Build X360Browser Core
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "*.zip"
+      - ".github/workflows/build-from-zip.yml"
+
+permissions:
+  contents: read
+
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
     steps:
-      - uses: actions/checkout@v4
-      - name: Packages
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential bison flex texinfo libgmp-dev libmpfr-dev libmpc-dev curl xz-utils patch python3 cmake ninja-build git
-      - name: Clone xsdk
-        run: git clone --depth 1 https://github.com/xenosworks/xsdk.git /home/runner/xsdk
-      - uses: actions/cache@v4
-        id: tc
+          sudo apt-get install --no-install-recommends -y \
+            cmake \
+            ninja-build \
+            g++ \
+            unzip
+
+      - name: Extract ZIP and locate main CMakeLists
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p extracted
+
+          mapfile -t ZIP_FILES < <(
+            find . -maxdepth 1 -type f -iname '*.zip' -print | sort
+          )
+
+          if [ "${#ZIP_FILES[@]}" -eq 0 ]; then
+            echo "ERRO: nenhum arquivo ZIP encontrado na raiz do repositorio."
+            exit 1
+          fi
+
+          if [ "${#ZIP_FILES[@]}" -gt 1 ]; then
+            echo "ERRO: existe mais de um ZIP na raiz."
+            echo "Deixe apenas o ZIP do projeto que deseja compilar."
+            printf '%s\n' "${ZIP_FILES[@]}"
+            exit 1
+          fi
+
+          ZIP="${ZIP_FILES[0]}"
+          echo "Arquivo selecionado: $ZIP"
+
+          unzip -q "$ZIP" -d extracted
+
+          mapfile -t CMAKE_FILES < <(
+            grep -rl \
+              --include='CMakeLists.txt' \
+              'add_library(x360browser_core' \
+              extracted | sort || true
+          )
+
+          if [ "${#CMAKE_FILES[@]}" -eq 0 ]; then
+            echo "ERRO: nao encontrei o CMakeLists.txt principal."
+            echo "CMakeLists.txt encontrados no ZIP:"
+            find extracted -type f -name CMakeLists.txt -print || true
+            exit 1
+          fi
+
+          SRC_CMAKE="${CMAKE_FILES[0]}"
+          SRC_DIR="$(dirname "$SRC_CMAKE")"
+
+          if [ ! -f "$SRC_DIR/src/url.cpp" ] || \
+             [ ! -d "$SRC_DIR/include" ]; then
+            echo "ERRO: a estrutura do projeto nao corresponde ao esperado."
+            echo "Diretorio encontrado: $SRC_DIR"
+            exit 1
+          fi
+
+          echo "CMake principal encontrado: $SRC_CMAKE"
+          echo "Diretorio do projeto: $SRC_DIR"
+
+          printf 'SRC_DIR=%s\n' "$SRC_DIR" >> "$GITHUB_ENV"
+
+      - name: Configure project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cmake \
+            -S "$SRC_DIR" \
+            -B build \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DX360BROWSER_BUILD_DEMO=ON \
+            -DX360BROWSER_BUILD_TESTS=ON \
+            -DBUILD_TESTING=ON \
+            2>&1 | tee build-configure.log
+
+      - name: Compile project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cmake --build build --parallel 2 \
+            2>&1 | tee build-compile.log
+
+      - name: Run tests
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ctest --test-dir build --output-on-failure \
+            2>&1 | tee build-tests.log
+
+      - name: Save build results and logs
+        if: always()
+        uses: actions/upload-artifact@v7
         with:
-          path: /home/runner/xsdk-gcc
-          key: xsdk-gcc-v1
-      - name: Build toolchain
-        if: steps.tc.outputs.cache-hit != 'true'
-        run: |
-          cd /home/runner/xsdk
-          PREFIX=/home/runner/xsdk-gcc WORK=/home/runner/xsdk-gcc-work JOBS=$(nproc) bash tools/toolchain/build.sh
-      - uses: actions/cache@v4
-        id: gl
-        with:
-          path: /home/runner/glslang-bin
-          key: glslang-xenon-v1
-      - name: Build glslang
-        if: steps.gl.outputs.cache-hit != 'true'
-        run: |
-          git clone --depth 1 --branch xenon https://github.com/xenosworks/glslang-xenon.git /home/runner/glslang-xenon
-          cd /home/runner/glslang-xenon
-          python3 update_glslang_sources.py
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DENABLE_OPT=ON -DSPIRV_SKIP_EXECUTABLES=ON -DGLSLANG_TESTS=OFF
-          cmake --build build
-          mkdir -p /home/runner/glslang-bin
-          cp build/StandAlone/glslang /home/runner/glslang-bin/glslang
-      - name: Install glslang
-        run: cp /home/runner/glslang-bin/glslang /home/runner/xsdk-gcc/bin/glslang
-      - name: Build xsdk
-        run: |
-          cd /home/runner/xsdk
-          make -j$(nproc)
-      - name: Build browser
-        run: |
-          cp "$GITHUB_WORKSPACE/browser/main.c" /home/runner/xsdk/samples/triangle/main.c
-          cd /home/runner/xsdk
-          make samples
-      - uses: actions/upload-artifact@v4
-        with:
-          name: browser-xex
-          path: /home/runner/xsdk/build/samples/triangle/*.xex
+          name: X360Browser-build-results
+          path: |
+            build/
+            build-configure.log
+            build-compile.log
+            build-tests.log
+          if-no-files-found: warn
+          retention-days: 7
