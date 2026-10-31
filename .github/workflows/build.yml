@@ -1,36 +1,456 @@
-name: build
-on: [push, workflow_dispatch]
+name: X360 Web Total - Build, Test and Auto Release
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+    inputs:
+      source_archive:
+        description: "ZIP de código-fonte 0.6.0; deixe vazio para detectar automaticamente"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: x360-web-total-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  LIBXENON_IMAGE: free60/libxenon@sha256:3534d7952210ee5553790a1c1f12001145655e28f9e12a01ce151efe4b4f743d
+  XELL_LAUNCH2_URL: https://github.com/mitchellwaite/XellLaunch2/releases/download/v2.2.0/XellLaunch2.xex
+  XELL_LAUNCH2_SHA256: 49dd8666b83a7c7b37597affc46513fe2cb9ab5cb2fe1fb71da1b13175276bb0
+
 jobs:
-  build:
+  build-test-package-release:
+    name: Compile, validate, package and publish
     runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
     steps:
-      - name: Packages
+      - name: Download repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install host build tools
+        shell: bash
         run: |
+          set -Eeuo pipefail
           sudo apt-get update
-          sudo apt-get install -y build-essential bison flex texinfo libgmp-dev libmpfr-dev libmpc-dev curl xz-utils patch python3 cmake ninja-build git
-      - name: Clone xsdk
-        run: git clone --depth 1 https://github.com/xenosworks/xsdk.git /home/runner/xsdk
-      - uses: actions/cache@v4
-        id: tc
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake gcc g++ make python3 python3-pip \
+            curl file zip unzip
+          docker --version
+          cmake --version
+          python3 --version
+
+      - name: Find or safely extract the X360 Web Total source
+        id: source
+        shell: bash
+        env:
+          SOURCE_ARCHIVE_INPUT: ${{ github.event.inputs.source_archive || '' }}
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import os
+          import shutil
+          import stat
+          import zipfile
+          from pathlib import Path, PurePosixPath
+
+          workspace = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+          temp_root = Path(os.environ["RUNNER_TEMP"]) / "xwt-source"
+          requested_archive = os.environ.get("SOURCE_ARCHIVE_INPUT", "").strip()
+          required = (
+              "VERSION",
+              "REVISION.txt",
+              "browser/Makefile",
+              "browser/CMakeLists.txt",
+              "scripts/package_usb.py",
+              "scripts/test_package_usb.py",
+              "scripts/test_nand_boundary.py",
+              "README-INSTALL-PT-BR.txt",
+              "docs/BOOT-FLOW.md",
+              "usb/X360WebTotal/config/browser.ini",
+              "usb/X360WebTotal/ui/home.html",
+          )
+
+          def valid_project(root: Path) -> bool:
+              if not root.is_dir() or not all((root / item).is_file() for item in required):
+                  return False
+              try:
+                  return (
+                      (root / "VERSION").read_text(encoding="ascii").strip() == "0.6.0"
+                      and (root / "REVISION.txt").read_text(encoding="ascii").strip() == "revision-expanded-1"
+                  )
+              except (OSError, UnicodeError):
+                  return False
+
+          project = workspace if (not requested_archive and valid_project(workspace)) else None
+
+          if project is None:
+              candidates = []
+              if requested_archive:
+                  requested_path = Path(requested_archive)
+                  if requested_path.is_absolute() or ".." in requested_path.parts:
+                      raise SystemExit("source_archive deve ser um caminho relativo dentro do repositório.")
+                  selected_archive = (workspace / requested_path).resolve()
+                  if workspace not in selected_archive.parents or not selected_archive.is_file():
+                      raise SystemExit(f"ZIP informado não existe dentro do repositório: {requested_archive}")
+                  archive_paths = [selected_archive]
+              else:
+                  archive_paths = sorted(workspace.rglob("*.zip"))
+
+              for archive_path in archive_paths:
+                  if ".git" in archive_path.relative_to(workspace).parts:
+                      continue
+                  try:
+                      with zipfile.ZipFile(archive_path) as archive:
+                          infos = archive.infolist()
+                          names = {item.filename for item in infos}
+                          roots = set()
+                          for info in infos:
+                              name = info.filename
+                              if "\\" in name or name.startswith("/"):
+                                  continue
+                              path = PurePosixPath(name)
+                              if ".." in path.parts:
+                                  continue
+                              if path.name != "VERSION":
+                                  continue
+                              prefix = "" if str(path.parent) == "." else str(path.parent) + "/"
+                              if all(prefix + item in names for item in required):
+                                  roots.add(prefix.rstrip("/"))
+                          for prefix in roots:
+                              version_member = (prefix + "/" if prefix else "") + "VERSION"
+                              revision_member = (prefix + "/" if prefix else "") + "REVISION.txt"
+                              if archive.read(version_member).decode("ascii").strip() == "0.6.0" and archive.read(revision_member).decode("ascii").strip() == "revision-expanded-1":
+                                  candidates.append((archive_path, prefix, infos))
+                  except (OSError, zipfile.BadZipFile, KeyError, UnicodeError):
+                      continue
+
+              if len(candidates) != 1:
+                  available = "\n".join(str(item) for item in workspace.rglob("*.zip") if ".git" not in item.parts)
+                  raise SystemExit(
+                      "Não encontrei uma única fonte compatível do X360 Web Total 0.6.0. "
+                      "Extraia o conteúdo de X360-Web-Total-0.6.0-Revision-Expanded-source.zip "
+                      "na raiz do repositório ou coloque esse ZIP na raiz. ZIPs encontrados:\n" + available
+                  )
+
+              archive_path, prefix, infos = candidates[0]
+              shutil.rmtree(temp_root, ignore_errors=True)
+              temp_root.mkdir(parents=True, exist_ok=True)
+              total_size = 0
+              with zipfile.ZipFile(archive_path) as archive:
+                  for info in infos:
+                      name = info.filename
+                      if "\\" in name or name.startswith("/"):
+                          raise SystemExit(f"Caminho inseguro no ZIP: {name}")
+                      path = PurePosixPath(name)
+                      if ".." in path.parts:
+                          raise SystemExit(f"Caminho inseguro no ZIP: {name}")
+                      mode = info.external_attr >> 16
+                      if stat.S_ISLNK(mode):
+                          raise SystemExit(f"Link simbólico não permitido no ZIP: {name}")
+                      total_size += info.file_size
+                      if info.file_size > 32 * 1024 * 1024 or total_size > 128 * 1024 * 1024:
+                          raise SystemExit("ZIP excede os limites de extração permitidos.")
+                      if info.is_dir():
+                          continue
+                      target = temp_root.joinpath(*path.parts)
+                      target.parent.mkdir(parents=True, exist_ok=True)
+                      with archive.open(info) as src, target.open("wb") as dst:
+                          shutil.copyfileobj(src, dst)
+              project = temp_root / prefix if prefix else temp_root
+
+          if not valid_project(project):
+              raise SystemExit(f"Estrutura ou versão incorreta: {project}")
+
+          version = (project / "VERSION").read_text(encoding="ascii").strip()
+          revision = (project / "REVISION.txt").read_text(encoding="ascii").strip()
+          short_sha = os.environ["GITHUB_SHA"][:12]
+          stem = f"X360-Web-Total-{version}-{revision}-{short_sha}"
+          tag = f"xwt-{version}-{revision}-{short_sha}"
+
+          env_file = Path(os.environ["GITHUB_ENV"])
+          with env_file.open("a", encoding="utf-8") as handle:
+              handle.write(f"PROJECT_DIR={project}\n")
+              handle.write(f"PROJECT_VERSION={version}\n")
+              handle.write(f"PROJECT_REVISION={revision}\n")
+              handle.write(f"ASSET_STEM={stem}\n")
+              handle.write(f"USB_ASSET_NAME={stem}-USB.zip\n")
+              handle.write(f"SOURCE_ASSET_NAME={stem}-source.zip\n")
+              handle.write(f"RELEASE_TAG={tag}\n")
+
+          print(f"Fonte selecionada: {project}")
+          print(f"Versão: {version} / {revision}")
+          print(f"Tag automática desta compilação: {tag}")
+          PY
+
+      - name: Verify source and compile host components
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(tr -d '\r\n' < "$PROJECT_DIR/VERSION")" = "$PROJECT_VERSION"
+          test "$(tr -d '\r\n' < "$PROJECT_DIR/REVISION.txt")" = "$PROJECT_REVISION"
+
+          python3 - "$PROJECT_DIR" <<'PY'
+          import sys
+          from pathlib import Path
+          root = Path(sys.argv[1])
+          sys.path.insert(0, str(root / "scripts"))
+          import package_usb
+          assert package_usb.VERSION == (root / "VERSION").read_text().strip()
+          assert package_usb.REVISION == (root / "REVISION.txt").read_text().strip()
+          print("Source version and packaging constants match.")
+          PY
+
+          cmake -S "$PROJECT_DIR/browser" \
+            -B "$RUNNER_TEMP/xwt-host-build" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS='-Wall -Wextra -Wpedantic -Werror'
+          cmake --build "$RUNNER_TEMP/xwt-host-build" --parallel 2
+          ctest --test-dir "$RUNNER_TEMP/xwt-host-build" --output-on-failure --no-tests=error
+
+      - name: Run packaging and NAND-safety boundary tests
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$PROJECT_DIR"
+          python3 scripts/test_package_usb.py
+          python3 scripts/test_nand_boundary.py
+          python3 -m py_compile scripts/package_usb.py scripts/test_package_usb.py scripts/test_nand_boundary.py
+
+      - name: Download the official LibXenon build image
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker pull "$LIBXENON_IMAGE"
+          docker image inspect "$LIBXENON_IMAGE" \
+            --format 'LibXenon image: {{index .RepoDigests 0}}' \
+            | tee "$RUNNER_TEMP/libxenon-image.txt"
+
+      - name: Cross-compile the real Xbox 360 ELF
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker run --rm \
+            --volume "$PROJECT_DIR:/project" \
+            --workdir /project \
+            --entrypoint /bin/bash \
+            --env DEVKITXENON=/usr/local/xenon \
+            "$LIBXENON_IMAGE" \
+            -lc 'set -Eeuo pipefail; export PATH="$PATH:$DEVKITXENON/bin:$DEVKITXENON/usr/bin"; test -x "$DEVKITXENON/bin/xenon-gcc"; make -C browser clean all DEVKITXENON="$DEVKITXENON"'
+
+          test -s "$PROJECT_DIR/browser/xenon.elf"
+          file "$PROJECT_DIR/browser/xenon.elf"
+
+          python3 - "$PROJECT_DIR" <<'PY'
+          import sys
+          from pathlib import Path
+          root = Path(sys.argv[1])
+          sys.path.insert(0, str(root / "scripts"))
+          import package_usb
+          package_usb.validate_elf(root / "browser/xenon.elf")
+          print("ELF validado: ELF32 big-endian PowerPC com segmento executável.")
+          PY
+
+      - name: Download and authenticate XellLaunch2 2.2.0
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          curl --fail --show-error --location \
+            --retry 5 --retry-all-errors \
+            --connect-timeout 20 --max-time 180 \
+            "$XELL_LAUNCH2_URL" \
+            --output "$RUNNER_TEMP/XellLaunch2.xex"
+
+          echo "$XELL_LAUNCH2_SHA256  $RUNNER_TEMP/XellLaunch2.xex" \
+            | sha256sum --check
+
+      - name: Create and fully verify the FAT32 USB package
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 "$PROJECT_DIR/scripts/package_usb.py" \
+            --elf "$PROJECT_DIR/browser/xenon.elf" \
+            --xell "$RUNNER_TEMP/XellLaunch2.xex" \
+            --project "$PROJECT_DIR" \
+            --output "$RUNNER_TEMP/$USB_ASSET_NAME"
+
+          test -s "$RUNNER_TEMP/$USB_ASSET_NAME"
+
+      - name: Generate clean source archive, release manifest and checksums
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          SOURCE_ZIP="$RUNNER_TEMP/$SOURCE_ASSET_NAME"
+          python3 - "$PROJECT_DIR" "$SOURCE_ZIP" <<'PY'
+          import hashlib
+          import os
+          import stat
+          import sys
+          import zipfile
+          from pathlib import Path, PurePosixPath
+
+          project = Path(sys.argv[1]).resolve()
+          output = Path(sys.argv[2])
+          workspace = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+          workflow_ref = os.environ.get("GITHUB_WORKFLOW_REF", "")
+          repository_prefix = os.environ["GITHUB_REPOSITORY"] + "/"
+          if not workflow_ref.startswith(repository_prefix) or "@" not in workflow_ref:
+              raise SystemExit("Não foi possível identificar o caminho do workflow ativo no GitHub Actions.")
+          workflow_rel = workflow_ref[len(repository_prefix):].split("@", 1)[0]
+          workflow_path = PurePosixPath(workflow_rel)
+          if (workflow_path.is_absolute() or ".." in workflow_path.parts
+                  or len(workflow_path.parts) != 3
+                  or workflow_path.parts[:2] != (".github", "workflows")
+                  or workflow_path.suffix.lower() not in (".yml", ".yaml")):
+              raise SystemExit(f"Caminho de workflow inválido: {workflow_rel}")
+          workflow = workspace.joinpath(*workflow_path.parts)
+          if not workflow.is_file():
+              raise SystemExit(f"O workflow ativo não foi encontrado no checkout: {workflow_rel}")
+
+          skipped_dirs = {".git", "__pycache__", ".pytest_cache", "CMakeFiles", "Testing"}
+          skipped_suffixes = {".o", ".a", ".so", ".elf", ".elf32", ".pyc", ".zip"}
+          files = {}
+
+          for path in sorted(project.rglob("*")):
+              if not path.is_file():
+                  continue
+              if path.is_symlink():
+                  raise SystemExit(f"Link simbólico inesperado na fonte: {path}")
+              rel = path.relative_to(project).as_posix()
+              parts = Path(rel).parts
+              if any(part in skipped_dirs for part in parts):
+                  continue
+              if len(parts) >= 2 and parts[0] == ".github" and parts[1] == "workflows":
+                  continue
+              if path.suffix.lower() in skipped_suffixes:
+                  continue
+              if rel in {"browser/x360webtotal.elf32", "browser/xenon.elf"}:
+                  continue
+              files[rel] = path.read_bytes()
+
+          files[workflow_rel] = workflow.read_bytes()
+
+          manifest_lines = []
+          for rel, content in sorted(files.items()):
+              if rel == "SOURCE-MANIFEST.sha256":
+                  continue
+              digest = hashlib.sha256(content).hexdigest()
+              manifest_lines.append(f"{digest}  {rel}")
+          files["SOURCE-MANIFEST.sha256"] = ("\n".join(manifest_lines) + "\n").encode("ascii")
+
+          output.parent.mkdir(parents=True, exist_ok=True)
+          with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+              for rel, content in sorted(files.items()):
+                  info = zipfile.ZipInfo(rel, date_time=(2026, 1, 1, 0, 0, 0))
+                  info.compress_type = zipfile.ZIP_DEFLATED
+                  info.external_attr = (stat.S_IFREG | 0o644) << 16
+                  archive.writestr(info, content, compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
+
+          with zipfile.ZipFile(output) as archive:
+              bad = archive.testzip()
+              if bad is not None:
+                  raise SystemExit(f"Falha de CRC no fonte: {bad}")
+              names = set(archive.namelist())
+              if workflow_rel not in names or "browser/Makefile" not in names or "scripts/package_usb.py" not in names:
+                  raise SystemExit("O pacote de fonte não contém os arquivos essenciais.")
+          print(f"Código-fonte limpo gerado: {output} ({output.stat().st_size} bytes)")
+          PY
+
+          USB_HASH="$(sha256sum "$RUNNER_TEMP/$USB_ASSET_NAME" | cut -d ' ' -f 1)"
+          SOURCE_HASH="$(sha256sum "$SOURCE_ZIP" | cut -d ' ' -f 1)"
+          XELL_HASH="$(sha256sum "$RUNNER_TEMP/XellLaunch2.xex" | cut -d ' ' -f 1)"
+
+          python3 - "$RUNNER_TEMP/latest.json" "$GITHUB_REPOSITORY" "$RELEASE_TAG" \
+            "$USB_ASSET_NAME" "$SOURCE_ASSET_NAME" "$PROJECT_VERSION" \
+            "$PROJECT_REVISION" "$GITHUB_SHA" "$USB_HASH" "$SOURCE_HASH" "$XELL_HASH" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          (output, repository, tag, usb_name, source_name, version,
+           revision, commit, usb_hash, source_hash, xell_hash) = sys.argv[1:]
+          base = f"https://github.com/{repository}/releases/download/{tag}"
+          manifest = {
+              "product": "X360 Web Total",
+              "version": version,
+              "revision": revision,
+              "channel": "prerelease",
+              "release_tag": tag,
+              "commit": commit,
+              "assets": {
+                  "usb_package": f"{base}/{usb_name}",
+                  "source": f"{base}/{source_name}"
+              },
+              "sha256": {
+                  "usb_package": usb_hash,
+                  "source": source_hash,
+                  "xell_launch2": xell_hash
+              },
+              "boot_payload": "ELF32 big-endian PowerPC / LibXenon",
+              "launcher": "XellLaunch2.xex 2.2.0",
+              "https_tls": "disabled_until_validated",
+              "automatic_console_update": False,
+              "nand_access": False,
+              "physical_console_tested": False
+          }
+          Path(output).write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+          PY
+
+          (cd "$RUNNER_TEMP" && sha256sum \
+            "$USB_ASSET_NAME" \
+            "$SOURCE_ASSET_NAME" \
+            latest.json > SHA256SUMS.txt)
+
+      - name: Save build artifacts in Actions
+        uses: actions/upload-artifact@v4
         with:
-          path: /home/runner/xsdk-gcc
-          key: xsdk-gcc-v1
-      - name: Build toolchain
-        if: steps.tc.outputs.cache-hit != 'true'
+          name: x360-web-total-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/*-USB.zip
+            ${{ runner.temp }}/*-source.zip
+            ${{ runner.temp }}/latest.json
+            ${{ runner.temp }}/SHA256SUMS.txt
+            ${{ runner.temp }}/libxenon-image.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish the GitHub Release automatically
+        if: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
-          cd /home/runner/xsdk
-          PREFIX=/home/runner/xsdk-gcc WORK=/home/runner/xsdk-gcc-work JOBS=$(nproc) bash tools/toolchain/build.sh
-      - name: Build xsdk
-        run: |
-          cd /home/runner/xsdk
-          make -j$(nproc)
-      - name: Build template
-        run: |
-          cp -r /home/runner/xsdk/samples/template /home/runner/mytitle
-          cd /home/runner/mytitle
-          cmake -S . -B build -G Ninja -DCMAKE_TOOLCHAIN_FILE=/home/runner/xsdk/cmake/xsdk.cmake -DXSDK_TOOLCHAIN=/home/runner/xsdk-gcc -DCMAKE_BUILD_TYPE=RelWithDebInfo
-          cmake --build build
-      - uses: actions/upload-artifact@v4
-        with:
-          name: xbox-app
-          path: /home/runner/mytitle/build/*.xex
+          set -Eeuo pipefail
+          NOTES="$RUNNER_TEMP/release-notes.md"
+          TITLE="X360 Web Total $PROJECT_VERSION - $PROJECT_REVISION (${GITHUB_SHA::12})"
+
+          cat > "$NOTES" <<EOF
+          # X360 Web Total $PROJECT_VERSION
+
+          **Revision:** $PROJECT_REVISION  
+          **Commit:** $GITHUB_SHA  
+          **Build tag:** $RELEASE_TAG
+
+          ## Arquivos
+          - Pacote USB: $USB_ASSET_NAME
+          - Código-fonte: $SOURCE_ASSET_NAME
+          - Manifesto: latest.json
+          - Checksums: SHA256SUMS.txt
+
+          ## Validação
+          - Compilação host e testes C aprovados.
+          - Testes do empacotador e limite NAND executados.
+          - xenon.elf compilado com LibXenon e validado como ELF32 Powe
