@@ -1,5 +1,7 @@
+#pragma GCC diagnostic ignored "-Wsign-compare"
+#include <stdbool.h>
 
-#pragma GCC diagnostic ignored "-Wsign-compare"#include <stdbool.h>
+
 #include <stdint.h>
 #include <string.h>
 
