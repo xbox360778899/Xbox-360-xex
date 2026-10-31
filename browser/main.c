@@ -1,7 +1,6 @@
 #pragma GCC diagnostic ignored "-Wsign-compare"
+
 #include <stdbool.h>
-
-
 #include <stdint.h>
 #include <string.h>
 
@@ -445,9 +444,9 @@ static void parse_html(const char *html)
 				closing = true;
 				q++;
 			}
-			char name[8];
+			char name[12];
 			int ni = 0;
-			while (q < te && ni < 7 && is_alnum(*q))
+			while (q < te && ni < 11 && is_alnum(*q))
 				name[ni++] = lc(*q++);
 			name[ni] = 0;
 
@@ -479,7 +478,7 @@ static void parse_html(const char *html)
 					add_word("*", 1, C_H2, -1);
 			} else if (!strcmp(name, "a")) {
 				if (!closing) {
-					if (link_n < MAX_LINKS) {
+					if (link_n < (int)MAX_LINKS) {
 						get_href(q, te, link_url[link_n]);
 						in_link = link_n;
 						link_n++;
@@ -581,7 +580,7 @@ static void open_link(void)
 	if (sel < 0)
 		return;
 	const char *url = link_url[sel];
-	if (!strncmp(url, "page:", 5) && url[5] >= '0' && url[5] < '0' + PAGE_COUNT) {
+	if (!strncmp(url, "page:", 5) && url[5] >= '0' && url[5] < (char)('0' + PAGE_COUNT)) {
 		prev_page = cur_page;
 		load_page(url[5] - '0');
 	} else if (!strncmp(url, "http", 4)) {
@@ -688,62 +687,4 @@ static void run(const XsdkShader *vertex, const XsdkShader *pixel, volatile uint
 		xsdk_present_end();
 		frames++;
 	}
-}
-
-int main(void)
-{
-	xsdk_log_write("browser: right stick scrolls, left stick picks a link, A opens, Back ends");
-	const NTSTATUS splash = xsdk_splash_show(SPLASH_MS);
-	if (!NT_SUCCESS(splash))
-		xsdk_log_write("browser: xsdk_splash_show failed: 0x%08X", (unsigned)splash);
-	NTSTATUS status = xsdk_gpu_open();
-	if (!NT_SUCCESS(status)) {
-		xsdk_log_write("browser: xsdk_gpu_open failed: 0x%08X", (unsigned)status);
-		return 1;
-	}
-	XsdkShader vertex = { .microcode = NULL };
-	XsdkShader pixel = { .microcode = NULL };
-	status = xsdk_shader_load(&vertex, triangle_vert.container, triangle_vert.container_bytes);
-	if (NT_SUCCESS(status))
-		status = xsdk_shader_load(&pixel, triangle_frag.container, triangle_frag.container_bytes);
-	if (NT_SUCCESS(status))
-		status = xsdk_shader_set_vertex_layout(
-			&vertex, layout, sizeof layout / sizeof layout[0], (const uint32_t[]){ STRIDE_BYTES });
-	if (!NT_SUCCESS(status)) {
-		xsdk_log_write("browser: loading the shaders failed: 0x%08X", (unsigned)status);
-		return 1;
-	}
-	uint32_t cap = MAX_VERTICES;
-	volatile uint32_t *vertices = NULL;
-	while (cap >= MIN_VERTICES) {
-		vertices = xsdk_gpu_alloc(cap * STRIDE_BYTES);
-		if (vertices)
-			break;
-		cap /= 2;
-	}
-	if (!vertices) {
-		xsdk_log_write("browser: xsdk_gpu_alloc failed");
-		return 1;
-	}
-	vcap = cap;
-	uint32_t width = 0;
-	uint32_t height = 0;
-	status = xsdk_present_open(XSDK_DISPLAY_720P, BUFFERS, SWAP_INTERVAL, &width, &height);
-	if (!NT_SUCCESS(status)) {
-		xsdk_log_write("browser: xsdk_present_open failed: 0x%08X", (unsigned)status);
-		return 1;
-	}
-	screen_w = width;
-	screen_h = height;
-	load_page(0);
-	run(&vertex, &pixel, vertices, width, height);
-	xsdk_present_close();
-	xsdk_gpu_free(vertices);
-	xsdk_shader_free(&pixel);
-	xsdk_shader_free(&vertex);
-	status = xsdk_gpu_close();
-	if (!NT_SUCCESS(status))
-		xsdk_log_write("browser: xsdk_gpu_close failed: 0x%08X", (unsigned)status);
-	xsdk_log_write("browser: done");
-	return 0;
 }
